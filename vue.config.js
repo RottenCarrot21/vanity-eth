@@ -15,6 +15,9 @@ module.exports = {
                 filename: 'vanity.js',
             })
             .end();
+
+        // Exclude vanity.js from babel-loader to avoid thread-loader issues
+        config.module.rule('js').exclude.add(/vanity\.js$/);
     },
     configureWebpack: {
         plugins: process.env.DEPLOY
