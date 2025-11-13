@@ -42,6 +42,13 @@
                 </div>
             </div>
 
+            <!--WebGPU Status-->
+            <div class="row">
+                <div class="col-md-12">
+                    <webgpu-status></webgpu-status>
+                </div>
+            </div>
+
             <!--Result-->
             <div class="row">
                 <div class="col-md-12">
@@ -63,6 +70,8 @@
 
 <script>
     import Worker from './js/vanity.js';
+    import { webgpuChecker } from './js/webgpu-checker.js';
+    import { getOptimizedGPUParameters, getPerformanceDescription, estimatePerformanceGain } from './js/gpu-utils.js';
 
     import Headline from './vue/Headline';
     import Description from './vue/Description';
@@ -73,9 +82,22 @@
     import Save from './vue/Save.vue';
     import Corner from './vue/Corner';
     import Foot from './vue/Footer';
+    import WebGPUStatus from './vue/WebGPUStatus.vue';
 
     export default {
-        components: { Headline, Description, Err, UserInput, Statistics, Result, Save, Corner, Foot },
+        components: {
+            Headline,
+            Description,
+            Err,
+            UserInput,
+            Statistics,
+            Result,
+            Save,
+            Corner,
+            Foot,
+            // eslint-disable-next-line vue/no-unused-components
+            WebGPUStatus,
+        },
         data: function () {
             return {
                 running: false,
@@ -87,6 +109,24 @@
                 input: { prefix: '', suffix: '', checksum: true },
                 firstTick: null,
                 error: null,
+                webgpuCapabilities: {
+                    available: false,
+                    supported: false,
+                    adapter: null,
+                    device: null,
+                    reasons: [],
+                    features: [],
+                    limits: {},
+                    performanceInfo: {},
+                    errors: [],
+                },
+                gpuOptimization: {
+                    useGPU: false,
+                    performanceTier: 'unavailable',
+                    estimatedGain: 0,
+                    optimizedNB_ITER: 256,
+                    optimizedNB_THREAD: 64,
+                },
             };
         },
         watch: {
@@ -242,10 +282,12 @@
                     }
                     durations.push(times[times.length - 1] - times[times.length - 2]);
                     attempts += step;
+                    // eslint-disable-next-line no-console
                     console.info(
                         attempts + '/' + max + '...' + timeTaken(step, durations[durations.length - 1]) + ' addr/s'
                     );
                     if (attempts >= max) {
+                        // eslint-disable-next-line no-console
                         console.info(
                             '\nSpeed range: ' +
                                 timeTaken(step, Math.max(...durations)) +
@@ -253,19 +295,62 @@
                                 timeTaken(step, Math.min(...durations)) +
                                 ' addr/s'
                         );
+                        // eslint-disable-next-line no-console
                         console.info('Average: ' + timeTaken(attempts, times[times.length - 1] - times[0]) + ' addr/s');
                         worker.terminate();
                     }
                 };
                 const input = { checksum: true, prefix: 'f'.repeat(5), suffix: '' };
+                // eslint-disable-next-line no-console
                 console.info('Starting benchmark with 1 core...');
                 worker.postMessage(input);
+            },
+            async checkWebGPUCapabilities() {
+                try {
+                    // eslint-disable-next-line no-console
+                    console.log('Checking WebGPU capabilities...');
+                    this.webgpuCapabilities = await webgpuChecker.runFullCheck();
+
+                    // Get optimized parameters
+                    const gpuParams = await getOptimizedGPUParameters();
+                    this.gpuOptimization = {
+                        useGPU: gpuParams.useGPU,
+                        performanceTier: gpuParams.performanceTier || 'unavailable',
+                        estimatedGain: Math.round(estimatePerformanceGain(gpuParams.performanceTier, this.threads)),
+                        optimizedNB_ITER: gpuParams.optimizedNB_ITER,
+                        optimizedNB_THREAD: gpuParams.optimizedNB_THREAD,
+                    };
+
+                    // Log performance information
+                    if (this.gpuOptimization.useGPU) {
+                        // eslint-disable-next-line no-console
+                        console.log(
+                            `WebGPU available: ${getPerformanceDescription(
+                                this.gpuOptimization.performanceTier,
+                                this.gpuOptimization.estimatedGain
+                            )}`
+                        );
+                    } else {
+                        // eslint-disable-next-line no-console
+                        console.log('WebGPU not available, will use CPU-only mode');
+                        if (this.webgpuCapabilities.reasons.length > 0) {
+                            // eslint-disable-next-line no-console
+                            console.log('Reasons:', this.webgpuCapabilities.reasons);
+                        }
+                    }
+                } catch (error) {
+                    // eslint-disable-next-line no-console
+                    console.error('Error checking WebGPU capabilities:', error);
+                    this.webgpuCapabilities.reasons.push(`Error during check: ${error.message}`);
+                    this.gpuOptimization.useGPU = false;
+                }
             },
         },
 
         created: function () {
             this.checkLocation();
             this.countCores();
+            this.checkWebGPUCapabilities();
             this.initWorkers();
             window['benchmark'] = this.benchmark;
         },
