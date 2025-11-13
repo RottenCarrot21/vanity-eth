@@ -1951,10 +1951,11 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
             // eslint-disable-next-line no-console
             console.log('Test: CPU computed address for privkey 1:', cpuAddressBuf);
 
-            // Set the search pattern to match the first 2 characters of the known address
-            const testSearchPrefix = cpuAddressBuf.substring(0, 2);
+            // Set the search pattern to match the ENTIRE address (100% should match)
+            // eslint-disable-next-line no-console
+            console.log('Test: Setting search pattern to full 40-char address...');
             const testBuf32 = new Uint32Array(64);
-            testBuf32[0] = testSearchPrefix.length;
+            testBuf32[0] = 40; // search for full 40-char address
             testBuf32[1] = 0; // no suffix
             for (let idx = 0; idx < 40; idx++) {
                 testBuf32[idx + 2] = cpuAddressBuf.charCodeAt(idx);
@@ -2004,12 +2005,30 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
 
             testEncoder.copyBufferToBuffer(resultxBuffer, 0, stagingBuffer, 0, resultxBufferSize);
             const testCommandBuffer = testEncoder.finish();
+            // eslint-disable-next-line no-console
+            console.log('Test: Submitting GPU commands...');
             device.queue.submit([testCommandBuffer]);
 
+            // eslint-disable-next-line no-console
+            console.log('Test: Waiting for GPU to finish...');
             await stagingBuffer.mapAsync(GPUMapMode.READ);
             const testArrayBuffer = stagingBuffer.getMappedRange();
             const testResultArray = new Uint32Array(testArrayBuffer).slice();
             stagingBuffer.unmap();
+
+            // eslint-disable-next-line no-console
+            console.log('Test: Full result array first 10 values:', Array.from(testResultArray.slice(0, 10)));
+            // eslint-disable-next-line no-console
+            console.log('Test: Result buffer size:', testResultArray.length);
+            // eslint-disable-next-line no-console
+            console.log(
+                'Test: Search pattern - prefix length:',
+                testBuf32[0],
+                'pattern:',
+                Array.from(testBuf32.slice(2, 12))
+                    .map((c) => String.fromCharCode(c))
+                    .join('')
+            );
 
             if (testResultArray[0] !== 0) {
                 let gpuAddr = '';
@@ -2034,6 +2053,17 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
             } else {
                 // eslint-disable-next-line no-console
                 console.error('✗ GPU did not produce any result - shader may not be executing');
+                // eslint-disable-next-line no-console
+                console.error('Test setup - CPU addr:', cpuAddressBuf, 'Search prefix length:', testBuf32[0]);
+                // eslint-disable-next-line no-console
+                console.error(
+                    'GPU threads:',
+                    optimizedNB_ITER,
+                    '*',
+                    optimizedNB_THREAD,
+                    '=',
+                    optimizedNB_ITER * optimizedNB_THREAD
+                );
                 return false;
             }
         };
