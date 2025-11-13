@@ -1960,7 +1960,11 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
                     compute: { module: shaderModule, entryPoint },
                 });
                 pipelines.push(pipelineCache[entryPoint]);
+                // eslint-disable-next-line no-console
+                console.log(`Successfully created ${entryPoint} pipeline`);
             } catch (error) {
+                // eslint-disable-next-line no-console
+                console.error(`Failed to create ${entryPoint} pipeline:`, error);
                 throw new Error(`Failed to create ${entryPoint} pipeline: ${error.message}`);
             }
         }
@@ -1974,12 +1978,12 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
             }
             device.queue.writeBuffer(gpuPrivateKey, 0, privateKey, 0, 8);
 
-            // Clear result buffer at start of iteration
-            const zeros = new Uint32Array(256);
-            device.queue.writeBuffer(resultxBuffer, 0, zeros, 0, 256);
-
             // Build single command buffer with all compute steps
             const mainCommandEncoder = device.createCommandEncoder();
+
+            // Clear result buffer using writeBuffer in the encoder (synchronous with GPU)
+            const zeros = new Uint32Array(256);
+            device.queue.writeBuffer(resultxBuffer, 0, zeros, 0, 256);
 
             // init step
             const initPass = mainCommandEncoder.beginComputePass();
@@ -2025,26 +2029,39 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
             device.queue.submit([mainCommandBuffer]);
 
             // Map staging buffer and read results
-            await stagingBuffer.mapAsync(GPUMapMode.READ);
-            const arrayBuffer = stagingBuffer.getMappedRange();
-            const resultArray = new Uint32Array(arrayBuffer).slice();
+            try {
+                await stagingBuffer.mapAsync(GPUMapMode.READ);
+                const arrayBuffer = stagingBuffer.getMappedRange();
+                const resultArray = new Uint32Array(arrayBuffer).slice();
 
-            if (resultArray[0] !== 0 && resultArray[0] !== lastFoundIndex) {
-                let str = '';
-                for (let k = 0; k < 40; k++) {
-                    str += String.fromCharCode(resultArray[k + 1]);
+                if (i < 10) {
+                    // eslint-disable-next-line no-console
+                    console.log(
+                        `Iteration ${i}: resultArray[0] = ${resultArray[0]}, lastFoundIndex = ${lastFoundIndex}`
+                    );
                 }
-                const tmp2 = [...privateKey];
-                tmp2[0] += resultArray[0] - 1000;
-                const str2 = uint32ArrayToHexString(tmp2);
-                lastFoundIndex = resultArray[0];
-                if (running) {
-                    cb({ address: '0x' + str, privKey: str2, attempts: i * optimizedNB_THREAD * optimizedNB_ITER });
-                    running = false; // Stop after finding one
+
+                if (resultArray[0] !== 0 && resultArray[0] !== lastFoundIndex) {
+                    let str = '';
+                    for (let k = 0; k < 40; k++) {
+                        str += String.fromCharCode(resultArray[k + 1]);
+                    }
+                    const tmp2 = [...privateKey];
+                    tmp2[0] += resultArray[0] - 1000;
+                    const str2 = uint32ArrayToHexString(tmp2);
+                    lastFoundIndex = resultArray[0];
+                    if (running) {
+                        cb({ address: '0x' + str, privKey: str2, attempts: i * optimizedNB_THREAD * optimizedNB_ITER });
+                        running = false; // Stop after finding one
+                    }
                 }
+
+                stagingBuffer.unmap();
+            } catch (mapError) {
+                // eslint-disable-next-line no-console
+                console.error('Error mapping staging buffer:', mapError);
+                throw mapError;
             }
-
-            stagingBuffer.unmap();
 
             if (i % 100 === 0) {
                 cb({ attempts: i * optimizedNB_THREAD * optimizedNB_ITER });
