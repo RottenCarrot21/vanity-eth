@@ -61,6 +61,8 @@ To be sure you're on the real Vanity-ETH website, search for [Vanity-ETH on GitH
 
 Vanity-ETH's performance may vary significantly across different browsers. Currently, Chrome provides the best results.
 
+WebGPU acceleration is supported in compatible browsers (Chrome 113+, etc.), providing up to 20x speedup for non-checksum address generation.
+
 While you can use Vanity-ETH on your phone or tablet, it is unlikely to match the speed of a traditional computer.
 
 **N.B:** Vanity-ETH is designed to be a user-friendly tool that runs directly in your browser, providing easy accessibility without the need to download or install additional software.
