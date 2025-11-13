@@ -1893,6 +1893,13 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
         });
         buffers.push(resultxBuffer);
 
+        // Create staging buffer for reading GPU results
+        const stagingBuffer = device.createBuffer({
+            size: resultxBufferSize,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+        buffers.push(stagingBuffer);
+
         const tmpBufSize =
             Uint32Array.BYTES_PER_ELEMENT *
             (33 + 8 + 8 + 8 + 64 + 1 + 1 + 1 + 1 + 1 + 1) *
@@ -2010,20 +2017,17 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
             step4Pass.dispatchWorkgroups(optimizedNB_ITER, 1);
             step4Pass.end();
 
-            const gpuReadBuffer = device.createBuffer({
-                size: resultxBufferSize,
-                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-            });
-            buffers.push(gpuReadBuffer);
-            mainCommandEncoder.copyBufferToBuffer(resultxBuffer, 0, gpuReadBuffer, 0, resultxBufferSize);
+            // Copy GPU result buffer to staging buffer for reading
+            mainCommandEncoder.copyBufferToBuffer(resultxBuffer, 0, stagingBuffer, 0, resultxBufferSize);
 
             const mainCommandBuffer = mainCommandEncoder.finish();
 
             device.queue.submit([mainCommandBuffer]);
 
-            await gpuReadBuffer.mapAsync(GPUMapMode.READ);
-            const arrayBuffer = gpuReadBuffer.getMappedRange();
-            const resultArray = new Uint32Array(arrayBuffer);
+            // Map staging buffer and read results
+            await stagingBuffer.mapAsync(GPUMapMode.READ);
+            const arrayBuffer = stagingBuffer.getMappedRange();
+            const resultArray = new Uint32Array(arrayBuffer).slice();
 
             if (resultArray[0] !== 0 && resultArray[0] !== lastFoundIndex) {
                 let str = '';
@@ -2040,7 +2044,7 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
                 }
             }
 
-            gpuReadBuffer.unmap();
+            stagingBuffer.unmap();
 
             if (i % 100 === 0) {
                 cb({ attempts: i * optimizedNB_THREAD * optimizedNB_ITER });
