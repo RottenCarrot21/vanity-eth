@@ -1833,142 +1833,231 @@ function uint32ArrayToHexString(arr) {
 
 /* eslint-disable no-undef */
 async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
-    if (!navigator.gpu) {
-        throw new Error('WebGPU not supported');
-    }
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) {
-        throw new Error('No GPU adapter found');
-    }
-    const device = await adapter.requestDevice();
+    let device = null;
+    let adapter = null;
+    let buffers = [];
+    let pipelines = [];
 
-    const gpuPrivateKey = device.createBuffer({
-        size: 32,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    const gpuFind = device.createBuffer({
-        size: Uint32Array.BYTES_PER_ELEMENT * 64,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    const resultxBufferSize = Uint32Array.BYTES_PER_ELEMENT * 256;
-    const resultxBuffer = device.createBuffer({
-        size: resultxBufferSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-    });
-    const tmpBufSize =
-        Uint32Array.BYTES_PER_ELEMENT * (33 + 8 + 8 + 8 + 64 + 1 + 1 + 1 + 1 + 1 + 1) * NB_ITER * NB_THREAD;
-    const tmpBuf = device.createBuffer({
-        size: tmpBufSize,
-        usage: GPUBufferUsage.STORAGE,
-    });
-
-    const bindGroupLayout = device.createBindGroupLayout({
-        entries: [
-            { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-            { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-            { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-            { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-        ],
-    });
-
-    const bindGroup = device.createBindGroup({
-        layout: bindGroupLayout,
-        entries: [
-            { binding: 0, resource: { buffer: resultxBuffer } },
-            { binding: 1, resource: { buffer: gpuPrivateKey } },
-            { binding: 2, resource: { buffer: tmpBuf } },
-            { binding: 3, resource: { buffer: gpuFind } },
-        ],
-    });
-
-    const shaderModule = device.createShaderModule({ code: shaderCode });
-    const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
-
-    let running = true;
-    let lastFoundIndex = 0;
-
-    const find =
-        prefix +
-        Array.from({ length: 40 - prefix.length - suffix.length })
-            .map(() => '0')
-            .join('') +
-        suffix;
-    const buf32 = new Uint32Array(64);
-    buf32[0] = prefix.length;
-    buf32[1] = suffix.length;
-    for (let i = 0; i < 40; i++) {
-        buf32[i + 2] = find.charCodeAt(i);
-    }
-    buf32[42] = isChecksum ? 1 : 0;
-    device.queue.writeBuffer(gpuFind, 0, buf32, 0, 64);
-
-    let i = -1;
-    while (running) {
-        i++;
-        const privateKey = new Uint32Array(8);
-        for (let j = 0; j < 8; j++) {
-            privateKey[j] = Math.floor(Math.random() * 0xffffffff);
+    try {
+        // Enhanced WebGPU setup with better error handling
+        if (!navigator.gpu) {
+            throw new Error('WebGPU not supported by browser');
         }
-        device.queue.writeBuffer(gpuPrivateKey, 0, privateKey, 0, 8);
 
-        const commands = ['init', 'step1', 'step2', 'step3', 'step4'].map((e) => {
-            const computeInitPip = device.createComputePipeline({
-                layout,
-                compute: { module: shaderModule, entryPoint: e },
-            });
-            const commandEncoder = device.createCommandEncoder();
-            const passEncoder = commandEncoder.beginComputePass();
-            passEncoder.setPipeline(computeInitPip);
-            passEncoder.setBindGroup(0, bindGroup);
-            passEncoder.dispatchWorkgroups(NB_ITER, 1);
-            passEncoder.end();
-            return commandEncoder.finish();
+        adapter = await navigator.gpu.requestAdapter({
+            powerPreference: 'high-performance',
+        });
+        if (!adapter) {
+            throw new Error('No GPU adapter found - GPU may be disabled or incompatible');
+        }
+
+        // Check adapter features and limits
+        const limits = adapter.limits || {};
+
+        // Validate required features and limits
+        if (limits.maxComputeInvocationsPerWorkgroup < 256) {
+            throw new Error('GPU does not support required compute workgroup size');
+        }
+
+        device = await adapter.requestDevice({
+            requiredFeatures: [],
+            requiredLimits: {
+                maxComputeInvocationsPerWorkgroup: Math.min(limits.maxComputeInvocationsPerWorkgroup, 1024),
+            },
         });
 
-        const init = commands[0];
-        const step1 = commands[1];
-        const step2 = commands[2];
-        const step3 = commands[3];
-        const step4 = commands[4];
+        if (!device) {
+            throw new Error('Failed to create GPU device');
+        }
 
-        const stepResCommand = device.createCommandEncoder();
-        const gpuReadBuffer = device.createBuffer({
+        // Performance optimization: use larger buffer sizes for better throughput
+        const optimizedNB_ITER = Math.min(NB_ITER, Math.floor(limits.maxComputeWorkgroupsPerDimension / 4) || NB_ITER);
+        const optimizedNB_THREAD = Math.min(NB_THREAD, limits.maxComputeWorkgroupSizeX || NB_THREAD);
+
+        const gpuPrivateKey = device.createBuffer({
+            size: 32,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        buffers.push(gpuPrivateKey);
+
+        const gpuFind = device.createBuffer({
+            size: Uint32Array.BYTES_PER_ELEMENT * 64,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        buffers.push(gpuFind);
+
+        const resultxBufferSize = Uint32Array.BYTES_PER_ELEMENT * 256;
+        const resultxBuffer = device.createBuffer({
             size: resultxBufferSize,
-            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
         });
-        stepResCommand.copyBufferToBuffer(resultxBuffer, 0, gpuReadBuffer, 0, resultxBufferSize);
-        const stepRes = stepResCommand.finish();
+        buffers.push(resultxBuffer);
 
-        const queu = [];
-        queu.push(init);
-        for (let k = 0; k < 256; k++) {
-            queu.push(step1);
-            queu.push(step2);
+        const tmpBufSize =
+            Uint32Array.BYTES_PER_ELEMENT *
+            (33 + 8 + 8 + 8 + 64 + 1 + 1 + 1 + 1 + 1 + 1) *
+            optimizedNB_ITER *
+            optimizedNB_THREAD;
+        const tmpBuf = device.createBuffer({
+            size: tmpBufSize,
+            usage: GPUBufferUsage.STORAGE,
+        });
+        buffers.push(tmpBuf);
+
+        const bindGroupLayout = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+            ],
+        });
+
+        const bindGroup = device.createBindGroup({
+            layout: bindGroupLayout,
+            entries: [
+                { binding: 0, resource: { buffer: resultxBuffer } },
+                { binding: 1, resource: { buffer: gpuPrivateKey } },
+                { binding: 2, resource: { buffer: tmpBuf } },
+                { binding: 3, resource: { buffer: gpuFind } },
+            ],
+        });
+
+        const shaderModule = device.createShaderModule({ code: shaderCode });
+        const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+
+        let running = true;
+        let lastFoundIndex = 0;
+
+        const find =
+            prefix +
+            Array.from({ length: 40 - prefix.length - suffix.length })
+                .map(() => '0')
+                .join('') +
+            suffix;
+        const buf32 = new Uint32Array(64);
+        buf32[0] = prefix.length;
+        buf32[1] = suffix.length;
+        for (let i = 0; i < 40; i++) {
+            buf32[i + 2] = find.charCodeAt(i);
         }
-        queu.push(step3);
-        queu.push(step4);
-        queu.push(stepRes);
+        buf32[42] = isChecksum ? 1 : 0;
+        device.queue.writeBuffer(gpuFind, 0, buf32, 0, 64);
 
-        device.queue.submit(queu);
-
-        await gpuReadBuffer.mapAsync(GPUMapMode.READ);
-        const arrayBuffer = gpuReadBuffer.getMappedRange();
-        if (new Uint32Array(arrayBuffer)[0] !== 0 && new Uint32Array(arrayBuffer)[0] !== lastFoundIndex) {
-            let str = '';
-            for (let k = 0; k < 40; k++) {
-                str += String.fromCharCode(new Uint32Array(arrayBuffer)[k + 1]);
-            }
-            const tmp2 = [...privateKey];
-            tmp2[0] += new Uint32Array(arrayBuffer)[0] - 1000;
-            const str2 = uint32ArrayToHexString(tmp2);
-            lastFoundIndex = new Uint32Array(arrayBuffer)[0];
-            if (running) {
-                cb({ address: '0x' + str, privKey: str2, attempts: i * NB_THREAD * NB_ITER });
-                running = false; // Stop after finding one
+        // Pre-create pipelines for better performance
+        const pipelineCache = {};
+        for (const entryPoint of ['init', 'step1', 'step2', 'step3', 'step4']) {
+            try {
+                pipelineCache[entryPoint] = device.createComputePipeline({
+                    layout,
+                    compute: { module: shaderModule, entryPoint },
+                });
+                pipelines.push(pipelineCache[entryPoint]);
+            } catch (error) {
+                throw new Error(`Failed to create ${entryPoint} pipeline: ${error.message}`);
             }
         }
-        if (i % 100 === 0) {
-            cb({ attempts: i * NB_THREAD * NB_ITER });
+
+        let i = -1;
+        while (running) {
+            i++;
+            const privateKey = new Uint32Array(8);
+            for (let j = 0; j < 8; j++) {
+                privateKey[j] = Math.floor(Math.random() * 0xffffffff);
+            }
+            device.queue.writeBuffer(gpuPrivateKey, 0, privateKey, 0, 8);
+
+            // Use cached pipelines for better performance
+            const commands = ['init', 'step1', 'step2', 'step3', 'step4'].map((entryPoint) => {
+                const pipeline = pipelineCache[entryPoint];
+                const commandEncoder = device.createCommandEncoder();
+                const passEncoder = commandEncoder.beginComputePass();
+                passEncoder.setPipeline(pipeline);
+                passEncoder.setBindGroup(0, bindGroup);
+                passEncoder.dispatchWorkgroups(optimizedNB_ITER, 1);
+                passEncoder.end();
+                return commandEncoder.finish();
+            });
+
+            const init = commands[0];
+            const step1 = commands[1];
+            const step2 = commands[2];
+            const step3 = commands[3];
+            const step4 = commands[4];
+
+            const stepResCommand = device.createCommandEncoder();
+            const gpuReadBuffer = device.createBuffer({
+                size: resultxBufferSize,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            });
+            buffers.push(gpuReadBuffer);
+            stepResCommand.copyBufferToBuffer(resultxBuffer, 0, gpuReadBuffer, 0, resultxBufferSize);
+            const stepRes = stepResCommand.finish();
+
+            const commandQueue = [];
+            commandQueue.push(init);
+            for (let k = 0; k < 256; k++) {
+                commandQueue.push(step1);
+                commandQueue.push(step2);
+            }
+            commandQueue.push(step3);
+            commandQueue.push(step4);
+            commandQueue.push(stepRes);
+
+            device.queue.submit(commandQueue);
+
+            await gpuReadBuffer.mapAsync(GPUMapMode.READ);
+            const arrayBuffer = gpuReadBuffer.getMappedRange();
+            const resultArray = new Uint32Array(arrayBuffer);
+
+            if (resultArray[0] !== 0 && resultArray[0] !== lastFoundIndex) {
+                let str = '';
+                for (let k = 0; k < 40; k++) {
+                    str += String.fromCharCode(resultArray[k + 1]);
+                }
+                const tmp2 = [...privateKey];
+                tmp2[0] += resultArray[0] - 1000;
+                const str2 = uint32ArrayToHexString(tmp2);
+                lastFoundIndex = resultArray[0];
+                if (running) {
+                    cb({ address: '0x' + str, privKey: str2, attempts: i * optimizedNB_THREAD * optimizedNB_ITER });
+                    running = false; // Stop after finding one
+                }
+            }
+
+            gpuReadBuffer.unmap();
+
+            if (i % 100 === 0) {
+                cb({ attempts: i * optimizedNB_THREAD * optimizedNB_ITER });
+            }
+        }
+    } catch (error) {
+        // Enhanced error reporting
+        const enhancedError = new Error(`GPU acceleration failed: ${error.message}`);
+        enhancedError.originalError = error;
+        enhancedError.isGPUErrror = true;
+        throw enhancedError;
+    } finally {
+        // Cleanup resources
+        try {
+            pipelines.forEach((pipeline) => {
+                if (pipeline && pipeline.destroy) {
+                    pipeline.destroy();
+                }
+            });
+
+            buffers.forEach((buffer) => {
+                if (buffer && buffer.destroy) {
+                    buffer.destroy();
+                }
+            });
+
+            if (device && device.destroy) {
+                device.destroy();
+            }
+        } catch (cleanupError) {
+            // eslint-disable-next-line no-console
+            console.warn('Error during GPU resource cleanup:', cleanupError);
         }
     }
 }
@@ -2060,7 +2149,18 @@ const getVanityWallet = async (prefix, suffix, isChecksum, cb) => {
         try {
             await gpuVanityWallet(prefix, suffix, isChecksum, cb);
         } catch (e) {
-            console.warn('GPU failed, falling back to CPU', e);
+            // Enhanced error handling with GPU-specific error detection
+            if (e.isGPUErrror) {
+                // eslint-disable-next-line no-console
+                console.warn('GPU acceleration failed, falling back to CPU:', e.message);
+                if (e.originalError) {
+                    // eslint-disable-next-line no-console
+                    console.warn('Original GPU error:', e.originalError);
+                }
+            } else {
+                // eslint-disable-next-line no-console
+                console.warn('Unexpected GPU error, falling back to CPU:', e);
+            }
             cpuVanityWallet(prefix, suffix, isChecksum, cb);
         }
     } else {

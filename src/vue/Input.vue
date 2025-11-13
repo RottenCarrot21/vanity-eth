@@ -73,6 +73,14 @@
                 <span>&nbsp;threads</span>
                 <span v-if="threads === cores"> (recommended)</span>
             </div>
+            <div class="gpu-status-indicator">
+                <i class="fas fa-microchip"></i>
+                <span class="gpu-status-text">GPU Acceleration</span>
+                <div class="gpu-status-badge" :class="gpuStatusClass">
+                    <i :class="gpuStatusIcon"></i>
+                    {{ gpuStatusText }}
+                </div>
+            </div>
             <div class="row">
                 <div class="col-lg-6 col-sm-12">
                     <input type="button" value="Generate" class="button-large hide-render" disabled />
@@ -140,6 +148,18 @@
                     random += mixCase(Math.floor(Math.random() * 16).toString(16));
                 }
                 return { random, prefix, suffix };
+            },
+            gpuStatusClass() {
+                if (!navigator.gpu) return 'gpu-unavailable';
+                return 'gpu-available';
+            },
+            gpuStatusIcon() {
+                if (!navigator.gpu) return 'fas fa-times-circle';
+                return 'fas fa-check-circle';
+            },
+            gpuStatusText() {
+                if (!navigator.gpu) return 'Unavailable';
+                return 'Available';
             },
         },
         methods: {
@@ -279,9 +299,59 @@
             display: inline-block
             width: 24px
             height: 24px
-            margin: 0 5px 2px 0
             padding: 0
-            line-height: 1em
+            margin: 0 4px
+            vertical-align: middle
+
+    .gpu-status-indicator
+        display: flex
+        align-items: center
+        justify-content: space-between
+        padding: 0.75em 1em
+        margin: 1em 0
+        background-color: $panel-background-alt
+        border-radius: 6px
+        border-left: 3px solid $primary
+
+        .fa-microchip
+            color: $primary
+            margin-right: 0.5em
+
+        .gpu-status-text
+            flex: 1
+            font-weight: 500
+            color: $text
+
+        .gpu-status-badge
+            display: flex
+            align-items: center
+            gap: 0.25em
+            padding: 0.25em 0.75em
+            border-radius: 12px
+            font-size: 0.8em
+            font-weight: 600
+
+            &.gpu-available
+                background-color: rgba(40, 167, 69, 0.1)
+                color: #28a745
+                border: 1px solid rgba(40, 167, 69, 0.2)
+
+            &.gpu-unavailable
+                background-color: rgba(220, 53, 69, 0.1)
+                color: #dc3545
+                border: 1px solid rgba(220, 53, 69, 0.2)
+
+            i
+                font-size: 0.9em
+
+    @media (max-width: 768px)
+        .gpu-status-indicator
+            flex-direction: column
+            align-items: flex-start
+            gap: 0.5em
+
+            .gpu-status-badge
+                align-self: flex-end
 
     .justify-content-center
         justify-content: center
