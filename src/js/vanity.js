@@ -1967,44 +1967,59 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
             }
             device.queue.writeBuffer(gpuPrivateKey, 0, privateKey, 0, 8);
 
-            // Use cached pipelines for better performance
-            const commands = ['init', 'step1', 'step2', 'step3', 'step4'].map((entryPoint) => {
-                const pipeline = pipelineCache[entryPoint];
-                const commandEncoder = device.createCommandEncoder();
-                const passEncoder = commandEncoder.beginComputePass();
-                passEncoder.setPipeline(pipeline);
-                passEncoder.setBindGroup(0, bindGroup);
-                passEncoder.dispatchWorkgroups(optimizedNB_ITER, 1);
-                passEncoder.end();
-                return commandEncoder.finish();
-            });
+            // Clear result buffer at start of iteration
+            const zeros = new Uint32Array(256);
+            device.queue.writeBuffer(resultxBuffer, 0, zeros, 0, 256);
 
-            const init = commands[0];
-            const step1 = commands[1];
-            const step2 = commands[2];
-            const step3 = commands[3];
-            const step4 = commands[4];
+            // Build single command buffer with all compute steps
+            const mainCommandEncoder = device.createCommandEncoder();
 
-            const stepResCommand = device.createCommandEncoder();
+            // init step
+            const initPass = mainCommandEncoder.beginComputePass();
+            initPass.setPipeline(pipelineCache['init']);
+            initPass.setBindGroup(0, bindGroup);
+            initPass.dispatchWorkgroups(optimizedNB_ITER, 1);
+            initPass.end();
+
+            // step1 and step2 repeated 256 times
+            for (let k = 0; k < 256; k++) {
+                const step1Pass = mainCommandEncoder.beginComputePass();
+                step1Pass.setPipeline(pipelineCache['step1']);
+                step1Pass.setBindGroup(0, bindGroup);
+                step1Pass.dispatchWorkgroups(optimizedNB_ITER, 1);
+                step1Pass.end();
+
+                const step2Pass = mainCommandEncoder.beginComputePass();
+                step2Pass.setPipeline(pipelineCache['step2']);
+                step2Pass.setBindGroup(0, bindGroup);
+                step2Pass.dispatchWorkgroups(optimizedNB_ITER, 1);
+                step2Pass.end();
+            }
+
+            // step3 step
+            const step3Pass = mainCommandEncoder.beginComputePass();
+            step3Pass.setPipeline(pipelineCache['step3']);
+            step3Pass.setBindGroup(0, bindGroup);
+            step3Pass.dispatchWorkgroups(optimizedNB_ITER, 1);
+            step3Pass.end();
+
+            // step4 step
+            const step4Pass = mainCommandEncoder.beginComputePass();
+            step4Pass.setPipeline(pipelineCache['step4']);
+            step4Pass.setBindGroup(0, bindGroup);
+            step4Pass.dispatchWorkgroups(optimizedNB_ITER, 1);
+            step4Pass.end();
+
             const gpuReadBuffer = device.createBuffer({
                 size: resultxBufferSize,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
             });
             buffers.push(gpuReadBuffer);
-            stepResCommand.copyBufferToBuffer(resultxBuffer, 0, gpuReadBuffer, 0, resultxBufferSize);
-            const stepRes = stepResCommand.finish();
+            mainCommandEncoder.copyBufferToBuffer(resultxBuffer, 0, gpuReadBuffer, 0, resultxBufferSize);
 
-            const commandQueue = [];
-            commandQueue.push(init);
-            for (let k = 0; k < 256; k++) {
-                commandQueue.push(step1);
-                commandQueue.push(step2);
-            }
-            commandQueue.push(step3);
-            commandQueue.push(step4);
-            commandQueue.push(stepRes);
+            const mainCommandBuffer = mainCommandEncoder.finish();
 
-            device.queue.submit(commandQueue);
+            device.queue.submit([mainCommandBuffer]);
 
             await gpuReadBuffer.mapAsync(GPUMapMode.READ);
             const arrayBuffer = gpuReadBuffer.getMappedRange();
