@@ -1936,6 +1936,44 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
         let running = true;
         let lastFoundIndex = 0;
 
+        // Define diagnostic tests (will be called after pipeline creation)
+        // Test basic buffer reading to verify the CPU→GPU→CPU pipeline works
+        const testBufferReadingWorks = async function () {
+            // eslint-disable-next-line no-console
+            console.log('=== Diagnostic Test 1: Buffer Reading ===');
+            // Write test data directly from CPU to GPU buffer
+            const testData = new Uint32Array(256);
+            testData[0] = 0xdeadbeef;
+            testData[1] = 0xcafebabe;
+            testData[2] = 0x12345678;
+            // eslint-disable-next-line no-console
+            console.log('Writing test data to GPU buffer:', testData.slice(0, 3));
+            device.queue.writeBuffer(resultxBuffer, 0, testData, 0, 256);
+
+            // Copy to staging buffer
+            const diagEncoder = device.createCommandEncoder();
+            diagEncoder.copyBufferToBuffer(resultxBuffer, 0, stagingBuffer, 0, resultxBufferSize);
+            device.queue.submit([diagEncoder.finish()]);
+
+            // Read back
+            await stagingBuffer.mapAsync(GPUMapMode.READ);
+            const diagArrayBuffer = stagingBuffer.getMappedRange();
+            const diagResultArray = new Uint32Array(diagArrayBuffer).slice();
+            stagingBuffer.unmap();
+
+            // eslint-disable-next-line no-console
+            console.log('Read back from staging buffer:', diagResultArray.slice(0, 3));
+            if (diagResultArray[0] === 0xdeadbeef && diagResultArray[1] === 0xcafebabe) {
+                // eslint-disable-next-line no-console
+                console.log('✓ Buffer reading works correctly');
+                return true;
+            } else {
+                // eslint-disable-next-line no-console
+                console.error('✗ Buffer reading FAILED - data mismatch!');
+                return false;
+            }
+        };
+
         // Test GPU with a known private key to ensure correctness
         const testGPUWithKnownKey = async function () {
             // Use a simple test private key: [0, 0, 0, ..., 0, 1]
@@ -2101,7 +2139,13 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
             }
         }
 
-        // Run the test
+        // Run the diagnostic test first
+        const bufferTestPassed = await testBufferReadingWorks();
+        if (!bufferTestPassed) {
+            throw new Error('Buffer reading test failed - cannot proceed');
+        }
+
+        // Run the GPU test
         const gpuTestPassed = await testGPUWithKnownKey();
 
         // Restore original search pattern
