@@ -1840,9 +1840,13 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
 
     try {
         // Enhanced WebGPU setup with better error handling
+        // eslint-disable-next-line no-console
+        console.log('=== WebGPU Initialization ===');
         if (!navigator.gpu) {
             throw new Error('WebGPU not supported by browser');
         }
+        // eslint-disable-next-line no-console
+        console.log('✓ WebGPU API available');
 
         adapter = await navigator.gpu.requestAdapter({
             powerPreference: 'high-performance',
@@ -1850,9 +1854,13 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
         if (!adapter) {
             throw new Error('No GPU adapter found - GPU may be disabled or incompatible');
         }
+        // eslint-disable-next-line no-console
+        console.log('✓ GPU adapter found:', adapter);
 
         // Check adapter features and limits
         const limits = adapter.limits || {};
+        // eslint-disable-next-line no-console
+        console.log('GPU Limits:', limits);
 
         // Validate required features and limits
         if (limits.maxComputeInvocationsPerWorkgroup < 256) {
@@ -1869,10 +1877,18 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
         if (!device) {
             throw new Error('Failed to create GPU device');
         }
+        // eslint-disable-next-line no-console
+        console.log('✓ GPU device created');
 
         // Performance optimization: use larger buffer sizes for better throughput
         const optimizedNB_ITER = Math.min(NB_ITER, Math.floor(limits.maxComputeWorkgroupsPerDimension / 4) || NB_ITER);
         const optimizedNB_THREAD = Math.min(NB_THREAD, limits.maxComputeWorkgroupSizeX || NB_THREAD);
+        // eslint-disable-next-line no-console
+        console.log(
+            `GPU Config: NB_ITER=${optimizedNB_ITER}, NB_THREAD=${optimizedNB_THREAD}, Total threads per iteration=${
+                optimizedNB_ITER * optimizedNB_THREAD
+            }`
+        );
 
         const gpuPrivateKey = device.createBuffer({
             size: 32,
@@ -1962,7 +1978,10 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
             stagingBuffer.unmap();
 
             // eslint-disable-next-line no-console
-            console.log('Read back from staging buffer:', diagResultArray.slice(0, 3));
+            console.log(
+                'Read back from staging buffer:',
+                Array.from(diagResultArray.slice(0, 3)).map((x) => '0x' + x.toString(16))
+            );
             if (diagResultArray[0] === 0xdeadbeef && diagResultArray[1] === 0xcafebabe) {
                 // eslint-disable-next-line no-console
                 console.log('✓ Buffer reading works correctly');
@@ -1970,6 +1989,13 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
             } else {
                 // eslint-disable-next-line no-console
                 console.error('✗ Buffer reading FAILED - data mismatch!');
+                // eslint-disable-next-line no-console
+                console.error('Expected: [0xdeadbeef, 0xcafebabe, 0x12345678]');
+                // eslint-disable-next-line no-console
+                console.error(
+                    'Got:',
+                    Array.from(diagResultArray.slice(0, 3)).map((x) => '0x' + x.toString(16))
+                );
                 return false;
             }
         };
@@ -2255,6 +2281,19 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
         }
     } catch (error) {
         // Enhanced error reporting
+        // eslint-disable-next-line no-console
+        console.error('=== GPU ERROR ===');
+        // eslint-disable-next-line no-console
+        console.error('Error message:', error.message);
+        // eslint-disable-next-line no-console
+        console.error('Error stack:', error.stack);
+        // eslint-disable-next-line no-console
+        console.error('Full error:', error);
+        // eslint-disable-next-line no-console
+        console.error('Adapter info:', adapter);
+        // eslint-disable-next-line no-console
+        console.error('Device info:', device);
+
         const enhancedError = new Error(`GPU acceleration failed: ${error.message}`);
         enhancedError.originalError = error;
         enhancedError.isGPUErrror = true;
