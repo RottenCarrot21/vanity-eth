@@ -1837,11 +1837,20 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
     let adapter = null;
     let buffers = [];
     let pipelines = [];
+    const DEBUG = false; // Set to true to enable detailed logging
 
     try {
         // Enhanced WebGPU setup with better error handling
+        if (DEBUG) {
+            // eslint-disable-next-line no-console
+            console.log('=== WebGPU Initialization ===');
+        }
         if (!navigator.gpu) {
             throw new Error('WebGPU not supported by browser');
+        }
+        if (DEBUG) {
+            // eslint-disable-next-line no-console
+            console.log('✓ WebGPU API available');
         }
 
         adapter = await navigator.gpu.requestAdapter({
@@ -1850,9 +1859,17 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
         if (!adapter) {
             throw new Error('No GPU adapter found - GPU may be disabled or incompatible');
         }
+        if (DEBUG) {
+            // eslint-disable-next-line no-console
+            console.log('✓ GPU adapter found:', adapter);
+        }
 
         // Check adapter features and limits
         const limits = adapter.limits || {};
+        if (DEBUG) {
+            // eslint-disable-next-line no-console
+            console.log('GPU Limits:', limits);
+        }
 
         // Validate required features and limits
         if (limits.maxComputeInvocationsPerWorkgroup < 256) {
@@ -1869,10 +1886,22 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
         if (!device) {
             throw new Error('Failed to create GPU device');
         }
+        if (DEBUG) {
+            // eslint-disable-next-line no-console
+            console.log('✓ GPU device created');
+        }
 
         // Performance optimization: use larger buffer sizes for better throughput
         const optimizedNB_ITER = Math.min(NB_ITER, Math.floor(limits.maxComputeWorkgroupsPerDimension / 4) || NB_ITER);
         const optimizedNB_THREAD = Math.min(NB_THREAD, limits.maxComputeWorkgroupSizeX || NB_THREAD);
+        if (DEBUG) {
+            // eslint-disable-next-line no-console
+            console.log(
+                `GPU Config: NB_ITER=${optimizedNB_ITER}, NB_THREAD=${optimizedNB_THREAD}, Total threads per iteration=${
+                    optimizedNB_ITER * optimizedNB_THREAD
+                }`
+            );
+        }
 
         const gpuPrivateKey = device.createBuffer({
             size: 32,
@@ -1892,6 +1921,13 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
         });
         buffers.push(resultxBuffer);
+
+        // Create staging buffer for reading GPU results
+        const stagingBuffer = device.createBuffer({
+            size: resultxBufferSize,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+        buffers.push(stagingBuffer);
 
         const tmpBufSize =
             Uint32Array.BYTES_PER_ELEMENT *
@@ -1929,6 +1965,186 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
         let running = true;
         let lastFoundIndex = 0;
 
+        // Define diagnostic tests (will be called after pipeline creation)
+        // Test basic buffer reading to verify the CPU→GPU→CPU pipeline works
+        const testBufferReadingWorks = async function () {
+            // eslint-disable-next-line no-console
+            console.log('=== Diagnostic Test 1: Buffer Reading ===');
+            // Write test data directly from CPU to GPU buffer
+            const testData = new Uint32Array(256);
+            testData[0] = 0xdeadbeef;
+            testData[1] = 0xcafebabe;
+            testData[2] = 0x12345678;
+            // eslint-disable-next-line no-console
+            console.log('Writing test data to GPU buffer:', testData.slice(0, 3));
+            device.queue.writeBuffer(resultxBuffer, 0, testData, 0, 256);
+
+            // Copy to staging buffer
+            const diagEncoder = device.createCommandEncoder();
+            diagEncoder.copyBufferToBuffer(resultxBuffer, 0, stagingBuffer, 0, resultxBufferSize);
+            device.queue.submit([diagEncoder.finish()]);
+
+            // Read back
+            await stagingBuffer.mapAsync(GPUMapMode.READ);
+            const diagArrayBuffer = stagingBuffer.getMappedRange();
+            const diagResultArray = new Uint32Array(diagArrayBuffer).slice();
+            stagingBuffer.unmap();
+
+            // eslint-disable-next-line no-console
+            console.log(
+                'Read back from staging buffer:',
+                Array.from(diagResultArray.slice(0, 3)).map((x) => '0x' + x.toString(16))
+            );
+            if (diagResultArray[0] === 0xdeadbeef && diagResultArray[1] === 0xcafebabe) {
+                // eslint-disable-next-line no-console
+                console.log('✓ Buffer reading works correctly');
+                return true;
+            } else {
+                // eslint-disable-next-line no-console
+                console.error('✗ Buffer reading FAILED - data mismatch!');
+                // eslint-disable-next-line no-console
+                console.error('Expected: [0xdeadbeef, 0xcafebabe, 0x12345678]');
+                // eslint-disable-next-line no-console
+                console.error(
+                    'Got:',
+                    Array.from(diagResultArray.slice(0, 3)).map((x) => '0x' + x.toString(16))
+                );
+                return false;
+            }
+        };
+
+        // Test GPU with a known private key to ensure correctness
+        const testGPUWithKnownKey = async function () {
+            // Use a simple test private key: [0, 0, 0, ..., 0, 1]
+            const testPrivateKey = new Uint32Array(8);
+            testPrivateKey[0] = 1; // Private key = 1
+            const cpuAddressBuf = privateToAddress(
+                Buffer.from(
+                    new Uint8Array([
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+                    ])
+                )
+            );
+            // eslint-disable-next-line no-console
+            console.log('Test: CPU computed address for privkey 1:', cpuAddressBuf);
+
+            // Set the search pattern to match the ENTIRE address (100% should match)
+            // eslint-disable-next-line no-console
+            console.log('Test: Setting search pattern to full 40-char address...');
+            const testBuf32 = new Uint32Array(64);
+            testBuf32[0] = 40; // search for full 40-char address
+            testBuf32[1] = 0; // no suffix
+            for (let idx = 0; idx < 40; idx++) {
+                testBuf32[idx + 2] = cpuAddressBuf.charCodeAt(idx);
+            }
+            testBuf32[42] = isChecksum ? 1 : 0;
+            device.queue.writeBuffer(gpuFind, 0, testBuf32, 0, 64);
+
+            // Now run GPU with this test key
+            device.queue.writeBuffer(gpuPrivateKey, 0, testPrivateKey, 0, 8);
+
+            const testZeros = new Uint32Array(256);
+            device.queue.writeBuffer(resultxBuffer, 0, testZeros, 0, 256);
+
+            const testEncoder = device.createCommandEncoder();
+
+            const testInitPass = testEncoder.beginComputePass();
+            testInitPass.setPipeline(pipelineCache['init']);
+            testInitPass.setBindGroup(0, bindGroup);
+            testInitPass.dispatchWorkgroups(optimizedNB_ITER, 1);
+            testInitPass.end();
+
+            for (let k = 0; k < 256; k++) {
+                const testStep1Pass = testEncoder.beginComputePass();
+                testStep1Pass.setPipeline(pipelineCache['step1']);
+                testStep1Pass.setBindGroup(0, bindGroup);
+                testStep1Pass.dispatchWorkgroups(optimizedNB_ITER, 1);
+                testStep1Pass.end();
+
+                const testStep2Pass = testEncoder.beginComputePass();
+                testStep2Pass.setPipeline(pipelineCache['step2']);
+                testStep2Pass.setBindGroup(0, bindGroup);
+                testStep2Pass.dispatchWorkgroups(optimizedNB_ITER, 1);
+                testStep2Pass.end();
+            }
+
+            const testStep3Pass = testEncoder.beginComputePass();
+            testStep3Pass.setPipeline(pipelineCache['step3']);
+            testStep3Pass.setBindGroup(0, bindGroup);
+            testStep3Pass.dispatchWorkgroups(optimizedNB_ITER, 1);
+            testStep3Pass.end();
+
+            const testStep4Pass = testEncoder.beginComputePass();
+            testStep4Pass.setPipeline(pipelineCache['step4']);
+            testStep4Pass.setBindGroup(0, bindGroup);
+            testStep4Pass.dispatchWorkgroups(optimizedNB_ITER, 1);
+            testStep4Pass.end();
+
+            testEncoder.copyBufferToBuffer(resultxBuffer, 0, stagingBuffer, 0, resultxBufferSize);
+            const testCommandBuffer = testEncoder.finish();
+            // eslint-disable-next-line no-console
+            console.log('Test: Submitting GPU commands...');
+            device.queue.submit([testCommandBuffer]);
+
+            // eslint-disable-next-line no-console
+            console.log('Test: Waiting for GPU to finish...');
+            await stagingBuffer.mapAsync(GPUMapMode.READ);
+            const testArrayBuffer = stagingBuffer.getMappedRange();
+            const testResultArray = new Uint32Array(testArrayBuffer).slice();
+            stagingBuffer.unmap();
+
+            // eslint-disable-next-line no-console
+            console.log('Test: Full result array first 10 values:', Array.from(testResultArray.slice(0, 10)));
+            // eslint-disable-next-line no-console
+            console.log('Test: Result buffer size:', testResultArray.length);
+            // eslint-disable-next-line no-console
+            console.log(
+                'Test: Search pattern - prefix length:',
+                testBuf32[0],
+                'pattern:',
+                Array.from(testBuf32.slice(2, 12))
+                    .map((c) => String.fromCharCode(c))
+                    .join('')
+            );
+
+            if (testResultArray[0] !== 0) {
+                let gpuAddr = '';
+                for (let k = 0; k < 40; k++) {
+                    gpuAddr += String.fromCharCode(testResultArray[k + 1]);
+                }
+                // eslint-disable-next-line no-console
+                console.log('Test: GPU computed address for privkey 1:', gpuAddr);
+                if (gpuAddr.toLowerCase() === cpuAddressBuf.toLowerCase()) {
+                    // eslint-disable-next-line no-console
+                    console.log('✓ GPU and CPU addresses MATCH - GPU is working correctly');
+                    return true;
+                } else {
+                    // eslint-disable-next-line no-console
+                    console.error('✗ GPU and CPU addresses DO NOT MATCH - GPU has a bug');
+                    // eslint-disable-next-line no-console
+                    console.error('Expected:', cpuAddressBuf);
+                    // eslint-disable-next-line no-console
+                    console.error('Got:', gpuAddr);
+                    return false;
+                }
+            } else {
+                // eslint-disable-next-line no-console
+                console.error('✗ GPU did not produce any result - shader may not be executing');
+                // eslint-disable-next-line no-console
+                console.error('Test setup - CPU addr:', cpuAddressBuf, 'Search prefix length:', testBuf32[0]);
+                // eslint-disable-next-line no-console
+                console.error(
+                    'GPU threads:',
+                    optimizedNB_ITER,
+                    '*',
+                    optimizedNB_THREAD,
+                    '=',
+                    optimizedNB_ITER * optimizedNB_THREAD
+                );
+                return false;
+            }
+        };
+
         const find =
             prefix +
             Array.from({ length: 40 - prefix.length - suffix.length })
@@ -1953,9 +2169,29 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
                     compute: { module: shaderModule, entryPoint },
                 });
                 pipelines.push(pipelineCache[entryPoint]);
+                // eslint-disable-next-line no-console
+                console.log(`Successfully created ${entryPoint} pipeline`);
             } catch (error) {
+                // eslint-disable-next-line no-console
+                console.error(`Failed to create ${entryPoint} pipeline:`, error);
                 throw new Error(`Failed to create ${entryPoint} pipeline: ${error.message}`);
             }
+        }
+
+        // Run the diagnostic test first
+        const bufferTestPassed = await testBufferReadingWorks();
+        if (!bufferTestPassed) {
+            throw new Error('Buffer reading test failed - cannot proceed');
+        }
+
+        // Run the GPU test
+        const gpuTestPassed = await testGPUWithKnownKey();
+
+        // Restore original search pattern
+        device.queue.writeBuffer(gpuFind, 0, buf32, 0, 64);
+
+        if (!gpuTestPassed) {
+            throw new Error('GPU test failed - GPU is not computing addresses correctly');
         }
 
         let i = -1;
@@ -1967,65 +2203,90 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
             }
             device.queue.writeBuffer(gpuPrivateKey, 0, privateKey, 0, 8);
 
-            // Use cached pipelines for better performance
-            const commands = ['init', 'step1', 'step2', 'step3', 'step4'].map((entryPoint) => {
-                const pipeline = pipelineCache[entryPoint];
-                const commandEncoder = device.createCommandEncoder();
-                const passEncoder = commandEncoder.beginComputePass();
-                passEncoder.setPipeline(pipeline);
-                passEncoder.setBindGroup(0, bindGroup);
-                passEncoder.dispatchWorkgroups(optimizedNB_ITER, 1);
-                passEncoder.end();
-                return commandEncoder.finish();
-            });
+            // Build single command buffer with all compute steps
+            const mainCommandEncoder = device.createCommandEncoder();
 
-            const init = commands[0];
-            const step1 = commands[1];
-            const step2 = commands[2];
-            const step3 = commands[3];
-            const step4 = commands[4];
+            // Clear result buffer using writeBuffer in the encoder (synchronous with GPU)
+            const zeros = new Uint32Array(256);
+            device.queue.writeBuffer(resultxBuffer, 0, zeros, 0, 256);
 
-            const stepResCommand = device.createCommandEncoder();
-            const gpuReadBuffer = device.createBuffer({
-                size: resultxBufferSize,
-                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-            });
-            buffers.push(gpuReadBuffer);
-            stepResCommand.copyBufferToBuffer(resultxBuffer, 0, gpuReadBuffer, 0, resultxBufferSize);
-            const stepRes = stepResCommand.finish();
+            // init step
+            const initPass = mainCommandEncoder.beginComputePass();
+            initPass.setPipeline(pipelineCache['init']);
+            initPass.setBindGroup(0, bindGroup);
+            initPass.dispatchWorkgroups(optimizedNB_ITER, 1);
+            initPass.end();
 
-            const commandQueue = [];
-            commandQueue.push(init);
+            // step1 and step2 repeated 256 times
             for (let k = 0; k < 256; k++) {
-                commandQueue.push(step1);
-                commandQueue.push(step2);
-            }
-            commandQueue.push(step3);
-            commandQueue.push(step4);
-            commandQueue.push(stepRes);
+                const step1Pass = mainCommandEncoder.beginComputePass();
+                step1Pass.setPipeline(pipelineCache['step1']);
+                step1Pass.setBindGroup(0, bindGroup);
+                step1Pass.dispatchWorkgroups(optimizedNB_ITER, 1);
+                step1Pass.end();
 
-            device.queue.submit(commandQueue);
-
-            await gpuReadBuffer.mapAsync(GPUMapMode.READ);
-            const arrayBuffer = gpuReadBuffer.getMappedRange();
-            const resultArray = new Uint32Array(arrayBuffer);
-
-            if (resultArray[0] !== 0 && resultArray[0] !== lastFoundIndex) {
-                let str = '';
-                for (let k = 0; k < 40; k++) {
-                    str += String.fromCharCode(resultArray[k + 1]);
-                }
-                const tmp2 = [...privateKey];
-                tmp2[0] += resultArray[0] - 1000;
-                const str2 = uint32ArrayToHexString(tmp2);
-                lastFoundIndex = resultArray[0];
-                if (running) {
-                    cb({ address: '0x' + str, privKey: str2, attempts: i * optimizedNB_THREAD * optimizedNB_ITER });
-                    running = false; // Stop after finding one
-                }
+                const step2Pass = mainCommandEncoder.beginComputePass();
+                step2Pass.setPipeline(pipelineCache['step2']);
+                step2Pass.setBindGroup(0, bindGroup);
+                step2Pass.dispatchWorkgroups(optimizedNB_ITER, 1);
+                step2Pass.end();
             }
 
-            gpuReadBuffer.unmap();
+            // step3 step
+            const step3Pass = mainCommandEncoder.beginComputePass();
+            step3Pass.setPipeline(pipelineCache['step3']);
+            step3Pass.setBindGroup(0, bindGroup);
+            step3Pass.dispatchWorkgroups(optimizedNB_ITER, 1);
+            step3Pass.end();
+
+            // step4 step
+            const step4Pass = mainCommandEncoder.beginComputePass();
+            step4Pass.setPipeline(pipelineCache['step4']);
+            step4Pass.setBindGroup(0, bindGroup);
+            step4Pass.dispatchWorkgroups(optimizedNB_ITER, 1);
+            step4Pass.end();
+
+            // Copy GPU result buffer to staging buffer for reading
+            mainCommandEncoder.copyBufferToBuffer(resultxBuffer, 0, stagingBuffer, 0, resultxBufferSize);
+
+            const mainCommandBuffer = mainCommandEncoder.finish();
+
+            device.queue.submit([mainCommandBuffer]);
+
+            // Map staging buffer and read results
+            try {
+                await stagingBuffer.mapAsync(GPUMapMode.READ);
+                const arrayBuffer = stagingBuffer.getMappedRange();
+                const resultArray = new Uint32Array(arrayBuffer).slice();
+
+                if (i < 10) {
+                    // eslint-disable-next-line no-console
+                    console.log(
+                        `Iteration ${i}: resultArray[0] = ${resultArray[0]}, lastFoundIndex = ${lastFoundIndex}`
+                    );
+                }
+
+                if (resultArray[0] !== 0 && resultArray[0] !== lastFoundIndex) {
+                    let str = '';
+                    for (let k = 0; k < 40; k++) {
+                        str += String.fromCharCode(resultArray[k + 1]);
+                    }
+                    const tmp2 = [...privateKey];
+                    tmp2[0] += resultArray[0] - 1000;
+                    const str2 = uint32ArrayToHexString(tmp2);
+                    lastFoundIndex = resultArray[0];
+                    if (running) {
+                        cb({ address: '0x' + str, privKey: str2, attempts: i * optimizedNB_THREAD * optimizedNB_ITER });
+                        running = false; // Stop after finding one
+                    }
+                }
+
+                stagingBuffer.unmap();
+            } catch (mapError) {
+                // eslint-disable-next-line no-console
+                console.error('Error mapping staging buffer:', mapError);
+                throw mapError;
+            }
 
             if (i % 100 === 0) {
                 cb({ attempts: i * optimizedNB_THREAD * optimizedNB_ITER });
@@ -2033,6 +2294,19 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
         }
     } catch (error) {
         // Enhanced error reporting
+        // eslint-disable-next-line no-console
+        console.error('=== GPU ERROR ===');
+        // eslint-disable-next-line no-console
+        console.error('Error message:', error.message);
+        // eslint-disable-next-line no-console
+        console.error('Error stack:', error.stack);
+        // eslint-disable-next-line no-console
+        console.error('Full error:', error);
+        // eslint-disable-next-line no-console
+        console.error('Adapter info:', adapter);
+        // eslint-disable-next-line no-console
+        console.error('Device info:', device);
+
         const enhancedError = new Error(`GPU acceleration failed: ${error.message}`);
         enhancedError.originalError = error;
         enhancedError.isGPUErrror = true;
