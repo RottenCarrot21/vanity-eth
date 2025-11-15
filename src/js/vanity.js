@@ -1837,16 +1837,21 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
     let adapter = null;
     let buffers = [];
     let pipelines = [];
+    const DEBUG = false; // Set to true to enable detailed logging
 
     try {
         // Enhanced WebGPU setup with better error handling
-        // eslint-disable-next-line no-console
-        console.log('=== WebGPU Initialization ===');
+        if (DEBUG) {
+            // eslint-disable-next-line no-console
+            console.log('=== WebGPU Initialization ===');
+        }
         if (!navigator.gpu) {
             throw new Error('WebGPU not supported by browser');
         }
-        // eslint-disable-next-line no-console
-        console.log('✓ WebGPU API available');
+        if (DEBUG) {
+            // eslint-disable-next-line no-console
+            console.log('✓ WebGPU API available');
+        }
 
         adapter = await navigator.gpu.requestAdapter({
             powerPreference: 'high-performance',
@@ -1854,13 +1859,17 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
         if (!adapter) {
             throw new Error('No GPU adapter found - GPU may be disabled or incompatible');
         }
-        // eslint-disable-next-line no-console
-        console.log('✓ GPU adapter found:', adapter);
+        if (DEBUG) {
+            // eslint-disable-next-line no-console
+            console.log('✓ GPU adapter found:', adapter);
+        }
 
         // Check adapter features and limits
         const limits = adapter.limits || {};
-        // eslint-disable-next-line no-console
-        console.log('GPU Limits:', limits);
+        if (DEBUG) {
+            // eslint-disable-next-line no-console
+            console.log('GPU Limits:', limits);
+        }
 
         // Validate required features and limits
         if (limits.maxComputeInvocationsPerWorkgroup < 256) {
@@ -1877,18 +1886,22 @@ async function gpuVanityWallet(prefix, suffix, isChecksum, cb) {
         if (!device) {
             throw new Error('Failed to create GPU device');
         }
-        // eslint-disable-next-line no-console
-        console.log('✓ GPU device created');
+        if (DEBUG) {
+            // eslint-disable-next-line no-console
+            console.log('✓ GPU device created');
+        }
 
         // Performance optimization: use larger buffer sizes for better throughput
         const optimizedNB_ITER = Math.min(NB_ITER, Math.floor(limits.maxComputeWorkgroupsPerDimension / 4) || NB_ITER);
         const optimizedNB_THREAD = Math.min(NB_THREAD, limits.maxComputeWorkgroupSizeX || NB_THREAD);
-        // eslint-disable-next-line no-console
-        console.log(
-            `GPU Config: NB_ITER=${optimizedNB_ITER}, NB_THREAD=${optimizedNB_THREAD}, Total threads per iteration=${
-                optimizedNB_ITER * optimizedNB_THREAD
-            }`
-        );
+        if (DEBUG) {
+            // eslint-disable-next-line no-console
+            console.log(
+                `GPU Config: NB_ITER=${optimizedNB_ITER}, NB_THREAD=${optimizedNB_THREAD}, Total threads per iteration=${
+                    optimizedNB_ITER * optimizedNB_THREAD
+                }`
+            );
+        }
 
         const gpuPrivateKey = device.createBuffer({
             size: 32,

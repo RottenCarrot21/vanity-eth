@@ -109,6 +109,7 @@
                 input: { prefix: '', suffix: '', checksum: true },
                 firstTick: null,
                 error: null,
+                lastCounterUpdate: 0,
                 webgpuCapabilities: {
                     available: false,
                     supported: false,
@@ -212,7 +213,12 @@
                     this.stopGen();
                     return this.displayResult(wallet);
                 }
-                this.$emit('increment-counter', wallet.attempts);
+                // Throttle UI updates - only emit every 16ms (~60fps) to avoid performance issues
+                const now = performance.now();
+                if (!this.lastCounterUpdate || now - this.lastCounterUpdate > 16) {
+                    this.$emit('increment-counter', wallet.attempts);
+                    this.lastCounterUpdate = now;
+                }
             },
 
             startGen: function () {
